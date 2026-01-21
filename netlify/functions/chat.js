@@ -1,13 +1,15 @@
 // Netlify Function for DeepSeek API
 // 支持中英文双语问答
 
-const fetch = require('node-fetch');
-
 exports.handler = async (event, context) => {
   // 仅允许POST请求
   if (event.httpMethod !== 'POST') {
     return {
       statusCode: 405,
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Content-Type': 'application/json'
+      },
       body: JSON.stringify({ error: 'Method Not Allowed' })
     };
   }
@@ -79,54 +81,71 @@ exports.handler = async (event, context) => {
 你应该回答："'Hello' is a common greeting used when meeting someone. Example: Hello, how are you? 
 中文翻译：'Hello'是见面时常用的问候语。例句：你好，你好吗？"`;
 
-    // 调用DeepSeek API
-    const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${DEEPSEEK_API_KEY}`
-      },
-      body: JSON.stringify({
-        model: 'deepseek-chat',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: message }
-        ],
-        max_tokens: 1500,
-        temperature: 0.7,
-        stream: false
-      })
+    // 使用Node.js内置的https模块
+    const https = require('https');
+    
+    const postData = JSON.stringify({
+      model: 'deepseek-chat',
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: message }
+      ],
+      max_tokens: 1500,
+      temperature: 0.7,
+      stream: false
     });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('DeepSeek API Error:', errorText);
-      
-      return {
-        statusCode: response.status,
-        headers,
-        body: JSON.stringify({ 
-          error: `DeepSeek API错误 (${response.status})`,
-          details: errorText
-        })
+    // 创建Promise来处理https请求
+    const apiResponse = await new Promise((resolve, reject) => {
+      const options = {
+        hostname: 'api.deepseek.com',
+        port: 443,
+        path: '/v1/chat/completions',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${DEEPSEEK_API_KEY}`,
+          'Content-Length': Buffer.byteLength(postData)
+        }
       };
-    }
 
-    const data = await response.json();
+      const req = https.request(options, (res) => {
+        let data = '';
+
+        res.on('data', (chunk) => {
+          data += chunk;
+        });
+
+        res.on('end', () => {
+          if (res.statusCode === 200) {
+            resolve(JSON.parse(data));
+          } else {
+            reject(new Error(`API Error ${res.statusCode}: ${data}`));
+          }
+        });
+      });
+
+      req.on('error', (error) => {
+        reject(error);
+      });
+
+      req.write(postData);
+      req.end();
+    });
 
     // 检查响应格式
-    if (!data.choices || !data.choices[0] || !data.choices[0].message) {
+    if (!apiResponse.choices || !apiResponse.choices[0] || !apiResponse.choices[0].message) {
       return {
         statusCode: 500,
         headers,
         body: JSON.stringify({ 
           error: 'DeepSeek API返回格式异常',
-          data: data
+          data: apiResponse
         })
       };
     }
 
-    const aiResponse = data.choices[0].message.content;
+    const aiResponse = apiResponse.choices[0].message.content;
 
     // 返回成功响应
     return {
@@ -135,7 +154,7 @@ exports.handler = async (event, context) => {
       body: JSON.stringify({
         success: true,
         message: aiResponse,
-        usage: data.usage || {}
+        usage: apiResponse.usage || {}
       })
     };
 
@@ -144,7 +163,10 @@ exports.handler = async (event, context) => {
     
     return {
       statusCode: 500,
-      headers,
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Content-Type': 'application/json'
+      },
       body: JSON.stringify({ 
         error: '服务器内部错误',
         message: error.message
