@@ -1,0 +1,26 @@
+{
+  "name": "english-learning-playground",
+  "version": "1.0.0",
+  "description": "英语学习乐园 - 集成DeepSeek AI的互动学习应用",
+  "main": "index.html",
+  "scripts": {
+    "dev": "netlify dev",
+    "build": "echo 'No build needed'",
+    "deploy": "netlify deploy --prod"
+  },
+  "keywords": [
+    "english",
+    "learning",
+    "deepseek",
+    "ai",
+    "education"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "node-fetch": "^2.7.0"
+  },
+  "devDependencies": {
+    "netlify-cli": "^17.0.0"
+  }
+}
