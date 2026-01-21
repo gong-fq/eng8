@@ -1,5 +1,8 @@
 // Netlify Function for DeepSeek API
 // 支持中英文双语问答
+// 优化版本：添加超时控制和更好的错误处理
+
+const https = require('https');
 
 exports.handler = async (event, context) => {
   // 仅允许POST请求
@@ -58,89 +61,50 @@ exports.handler = async (event, context) => {
     }
 
     // 构建系统提示词 - 支持中英双语提问
-    const systemPrompt = `你是一位专业的英语AI教师助手。你的任务是帮助用户学习英语。
+    const systemPrompt = `你是一位专业的英语AI教师助手。
 
-重要规则：
-1. 用户可以用中文或英文向你提问
-2. 如果用户用中文提问，你需要用中文回答，并提供英文翻译
-3. 如果用户用英文提问，你需要用英文回答，并提供中文翻译
-4. 提供详细、有帮助的英语学习内容（词汇、语法、写作、发音等）
-5. 给出具体例句和使用场景
-6. 保持鼓励和教育性的语气
+规则：
+1. 用户可以用中文或英文提问
+2. 如果用户用中文提问，用中文回答并提供英文翻译
+3. 如果用户用英文提问，用英文回答并提供中文翻译
+4. 回答要简洁但有帮助（不超过200字）
 
-回复格式：
-- 首先用用户使用的语言（中文或英文）详细回答问题
-- 然后提供另一种语言的翻译
-- 可以包含例句、语法说明、使用场景等
+格式示例：
+中文问题 → 中文回答 + 英文翻译
+英文问题 → 英文回答 + 中文翻译`;
 
-例如：
-如果用户问："apple是什么意思？"
-你应该回答："apple的意思是苹果，是一种常见的水果。例句：I eat an apple every day.（我每天吃一个苹果。）"
-
-如果用户问："What does 'hello' mean?"
-你应该回答："'Hello' is a common greeting used when meeting someone. Example: Hello, how are you? 
-中文翻译：'Hello'是见面时常用的问候语。例句：你好，你好吗？"`;
-
-    // 使用Node.js内置的https模块
-    const https = require('https');
-    
     const postData = JSON.stringify({
       model: 'deepseek-chat',
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: message }
       ],
-      max_tokens: 1500,
+      max_tokens: 800,  // 减少token数以加快响应
       temperature: 0.7,
       stream: false
     });
 
-    // 创建Promise来处理https请求
-    const apiResponse = await new Promise((resolve, reject) => {
-      const options = {
-        hostname: 'api.deepseek.com',
-        port: 443,
-        path: '/v1/chat/completions',
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${DEEPSEEK_API_KEY}`,
-          'Content-Length': Buffer.byteLength(postData)
-        }
-      };
+    console.log('Calling DeepSeek API...');
 
-      const req = https.request(options, (res) => {
-        let data = '';
+    // 使用Promise + 超时控制
+    const apiResponse = await Promise.race([
+      makeAPIRequest(postData, DEEPSEEK_API_KEY),
+      new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Request timeout')), 25000) // 25秒超时
+      )
+    ]);
 
-        res.on('data', (chunk) => {
-          data += chunk;
-        });
-
-        res.on('end', () => {
-          if (res.statusCode === 200) {
-            resolve(JSON.parse(data));
-          } else {
-            reject(new Error(`API Error ${res.statusCode}: ${data}`));
-          }
-        });
-      });
-
-      req.on('error', (error) => {
-        reject(error);
-      });
-
-      req.write(postData);
-      req.end();
-    });
+    console.log('DeepSeek API response received');
 
     // 检查响应格式
     if (!apiResponse.choices || !apiResponse.choices[0] || !apiResponse.choices[0].message) {
+      console.error('Invalid API response:', apiResponse);
       return {
         statusCode: 500,
         headers,
         body: JSON.stringify({ 
           error: 'DeepSeek API返回格式异常',
-          data: apiResponse
+          details: 'Response structure is invalid'
         })
       };
     }
@@ -159,18 +123,83 @@ exports.handler = async (event, context) => {
     };
 
   } catch (error) {
-    console.error('Function Error:', error);
+    console.error('Function Error:', error.message);
+    
+    // 根据错误类型返回不同的响应
+    let errorMessage = '服务器内部错误';
+    let statusCode = 500;
+    
+    if (error.message.includes('timeout')) {
+      errorMessage = 'API调用超时，请稍后重试';
+      statusCode = 504;
+    } else if (error.message.includes('401')) {
+      errorMessage = 'API密钥无效';
+      statusCode = 401;
+    } else if (error.message.includes('429')) {
+      errorMessage = 'API调用频率超限，请稍后重试';
+      statusCode = 429;
+    }
     
     return {
-      statusCode: 500,
+      statusCode: statusCode,
       headers: {
         'Access-Control-Allow-Origin': '*',
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({ 
-        error: '服务器内部错误',
-        message: error.message
+        error: errorMessage,
+        details: error.message
       })
     };
   }
 };
+
+// 辅助函数：发送API请求
+function makeAPIRequest(postData, apiKey) {
+  return new Promise((resolve, reject) => {
+    const options = {
+      hostname: 'api.deepseek.com',
+      port: 443,
+      path: '/v1/chat/completions',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Length': Buffer.byteLength(postData)
+      },
+      timeout: 25000 // 25秒超时
+    };
+
+    const req = https.request(options, (res) => {
+      let data = '';
+
+      res.on('data', (chunk) => {
+        data += chunk;
+      });
+
+      res.on('end', () => {
+        if (res.statusCode === 200) {
+          try {
+            resolve(JSON.parse(data));
+          } catch (e) {
+            reject(new Error('Failed to parse API response'));
+          }
+        } else {
+          reject(new Error(`API Error ${res.statusCode}: ${data}`));
+        }
+      });
+    });
+
+    req.on('error', (error) => {
+      reject(new Error(`Network error: ${error.message}`));
+    });
+
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('Request timeout'));
+    });
+
+    req.write(postData);
+    req.end();
+  });
+}
